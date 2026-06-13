@@ -1,0 +1,61 @@
+name: ping
+
+on:
+  schedule:
+    - cron: "*/10 * * * *"
+  workflow_dispatch: {}
+
+concurrency:
+  group: ping
+  cancel-in-progress: false
+
+jobs:
+  ping:
+    runs-on: ubuntu-latest
+    timeout-minutes: 3
+    steps:
+      - name: Request endpoint
+        id: req
+        env:
+          URL: ${{ secrets.PING_URL }}
+        run: |
+          start=$(date +%s%3N)
+          code=$(curl -s -o /dev/null -w '%{http_code}' --max-time 30 "$URL" || echo 000)
+          ms=$(( $(date +%s%3N) - start ))
+          echo "code=$code" >> "$GITHUB_OUTPUT"
+          echo "ms=$ms" >> "$GITHUB_OUTPUT"
+          [ "$code" = "200" ] && echo "ok=1" >> "$GITHUB_OUTPUT" || echo "ok=0" >> "$GITHUB_OUTPUT"
+
+      - name: Report to Discord
+        if: always()
+        env:
+          HOOK: ${{ secrets.DISCORD_WEBHOOK_URL }}
+          URL: ${{ secrets.PING_URL }}
+          CODE: ${{ steps.req.outputs.code }}
+          MS: ${{ steps.req.outputs.ms }}
+          OK: ${{ steps.req.outputs.ok }}
+        run: |
+          if [ "$OK" = "1" ]; then
+            title="✅ Service is up"; color=3066993
+          else
+            title="🔴 Service is DOWN"; color=15158332
+          fi
+          ts=$(date -u +%Y-%m-%dT%H:%M:%SZ)
+          # Build the payload with jq so values are safely JSON-escaped.
+          jq -n \
+            --arg title "$title" --argjson color "$color" --arg url "$URL" \
+            --arg code "$CODE" --arg ms "$MS" --arg ts "$ts" \
+            '{
+              username: "Ping",
+              embeds: [{
+                title: $title,
+                color: $color,
+                timestamp: $ts,
+                fields: [
+                  { name: "Endpoint", value: $url },
+                  { name: "HTTP", value: $code, inline: true },
+                  { name: "Latency", value: ($ms + " ms"), inline: true }
+                ]
+              }]
+            }' \
+          | curl -fsS -H "Content-Type: application/json" -d @- "$HOOK"
